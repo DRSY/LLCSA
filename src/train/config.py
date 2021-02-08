@@ -72,7 +72,8 @@ def parse_args():
                         help="Log every X updates steps.")
     parser.add_argument("--eval_steps", type=int, default=200)
     parser.add_argument("--memory", action='store_true', default=False)
-    parser.add_argument("--replay_interval", type=int, default=150)
+    parser.add_argument("--write_interval", type=int, default=100)
+    parser.add_argument("--replay_interval", type=int, default=200)
     args = parser.parse_args()
     return args
 

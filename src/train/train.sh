@@ -15,5 +15,7 @@ python train.py \
   --accumulate_grad_batches 2 \
   --logging_steps 100 \
   --eval_steps 1000 \
-  --replay_interval 1000 \
+  --write_interval 100 \
+  --replay_interval 200 \
+  --memory \
   "$@"

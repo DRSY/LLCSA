@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import transformers
 
 
 class EpisodicMemory(object):
@@ -21,7 +22,8 @@ class EpisodicMemory(object):
         self.margin_cnts = []
 
     def make_batch(self, n_samples):
-        ids = np.random.randint(len(self.lm_input_ids), size=n_samples)
+        ids = np.random.randint(len(self.lm_input_ids), size=min(
+            [n_samples, len(self.lm_input_ids)]))
         _pool = set()
         lm_ids = []
         lm_labels = []
@@ -49,6 +51,7 @@ class EpisodicMemory(object):
         lm_pt_mask = torch.ones_like(lm_pt_ids)
         lm_pt_mask[lm_pt_ids == self.pad_vocab_id] = 0
         lm_input_dict = {'input_ids': lm_pt_ids, 'attention_mask': lm_pt_mask}
+        lm_input_dict = transformers.BatchEncoding(lm_input_dict)
         lm_pt_labels = torch.tensor(
             [ids + (lm_max_len-len(ids)) * [-100] for ids in lm_labels], dtype=torch.long)
         qa_pt_ids = torch.tensor(
@@ -56,6 +59,7 @@ class EpisodicMemory(object):
         qa_pt_mask = torch.ones_like(qa_pt_ids)
         qa_pt_mask[qa_pt_ids == self.pad_vocab_id] = 0
         qa_input_dict = {'input_ids': qa_pt_ids, 'attention_mask': qa_pt_mask}
+        qa_input_dict = transformers.BatchEncoding(qa_input_dict)
         qa_pt_labels = torch.tensor(
             [ids + (qa_max_len-len(ids)) * [-100] for ids in qa_labels], dtype=torch.long)
         margin_pt_ids = torch.tensor(
@@ -64,6 +68,7 @@ class EpisodicMemory(object):
         margin_pt_mask[margin_pt_ids == self.pad_vocab_id] = 0
         margin_input_dict = {'input_ids': margin_pt_ids,
                              'attention_mask': margin_pt_mask}
+        margin_input_dict = transformers.BatchEncoding(margin_input_dict)
         margin_pt_labels = torch.tensor(
             [ids + (margin_max_len-len(ids)) * [-100] for ids in margin_labels], dtype=torch.long)
         margin_pt_cnts = torch.tensor(margin_cnts, dtype=torch.float32)
@@ -109,3 +114,15 @@ class EpisodicMemory(object):
     def sample(self, n_samples):
         batch = self.make_batch(n_samples)
         return batch
+
+    def __len__(self):
+        return len(self.lm_input_ids)
+
+    def clear(self):
+        self.lm_input_ids = []
+        self.lm_labels = []
+        self.qa_input_ids = []
+        self.qa_labels = []
+        self.margin_ids = []
+        self.margin_labels = []
+        self.margin_cnts = []

@@ -135,15 +135,17 @@ def train(args, model, tokenizer):
     logger.info("  Gradient Accumulation steps = %d",
                 args.accumulate_grad_batches)
     logger.info("  Total optimization steps = %d", t_total)
+    logger.info("  Episode Memory = {}".format(memory))
 
     seed_everything(args.seed)
     train_iterator = trange(int(args.max_epochs), desc="Epoch")
-    loss_func = nn.MultiMarginLoss(margin=args.margin)
+    loss_func = nn.MultiMarginLoss(margin=args.margin, reduction='none')
     global_steps = 0
     tr_loss, logging_loss = 0.0, 0.0
     best_loss = 0.0
     best_acc = -1
     best_steps = 0
+    total_n_input = 0
     cross_xnt = nn.CrossEntropyLoss(reduction='none')
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration")
@@ -151,6 +153,7 @@ def train(args, model, tokenizer):
             model.train()
             # lm_input_dict, lm_labels, qa_input_dict, qa_labels, margin_dicts = batch
             lm_input_dict, lm_labels, qa_input_dict, qa_labels, margin_dict, margin_labels, margin_cnt = batch
+            total_n_input += lm_labels.size(0)
             lm_input_dict = lm_input_dict.to(device)
             lm_labels = lm_labels.to(device)
             qa_input_dict = qa_input_dict.to(device)
@@ -179,8 +182,57 @@ def train(args, model, tokenizer):
             loss = loss.reshape(lm_labels.size(0), 3)
             margin_ranking_loss = loss_func(
                 loss, torch.ones(loss.size(0)).long().to(device) * 2)
+            _id_max_margin_loss = torch.argmax(
+                margin_ranking_loss, dim=-1).item()
+            mean_margin_loss = margin_ranking_loss.mean(dim=-1)
 
-            total_loss = qa_loss + args.alpha * lm_loss + args.beta * margin_ranking_loss
+            total_loss = qa_loss + args.alpha * lm_loss + args.beta * mean_margin_loss
+
+            # add to memory
+            if args.memory and memory is not None and (step + 1) % 50 == 0:
+                added_ = []
+                _tmp = (lm_input_dict['input_ids'][_id_max_margin_loss].tolist(), lm_labels[_id_max_margin_loss].tolist(), qa_input_dict['input_ids'][_id_max_margin_loss].tolist(), qa_labels[_id_max_margin_loss].tolist(), [
+                        margin_dict['input_ids'][i].tolist() for i in range(_id_max_margin_loss, _id_max_margin_loss+3)], [margin_labels[i].tolist() for i in range(_id_max_margin_loss, _id_max_margin_loss+3)], [margin_cnt[i].item() for i in range(_id_max_margin_loss, _id_max_margin_loss+3)])
+                added_.append(_tmp)
+                memory.write(added_)
+                logger.info("memory updated {}".format(len(memory)))
+
+            # sparse experience replay
+            if args.replay_interval > 0 and (step+1) % args.replay_interval == 0:
+                lm_input_dict, lm_labels, qa_input_dict, qa_labels, margin_dict, margin_labels, margin_cnt = memory.sample(
+                    total_n_input // (step + 1))
+                lm_input_dict = lm_input_dict.to(device)
+                lm_labels = lm_labels.to(device)
+                qa_input_dict = qa_input_dict.to(device)
+                qa_labels = qa_labels.to(device)
+
+                # lm loss
+                lm_output = model(**lm_input_dict, labels=lm_labels)
+                _lm_loss = lm_output.loss
+
+                # qa loss
+                qa_output = model(**qa_input_dict, labels=qa_labels)
+                _qa_loss = qa_output.loss
+
+                # margin ranking loss
+                margin_dict = margin_dict.to(device)
+                margin_labels = margin_labels.to(device)
+                margin_cnt = margin_cnt.to(device)
+                margin_output = model(**margin_dict)
+                logits = margin_output.logits
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = margin_labels[..., 1:].contiguous()
+                loss = cross_xnt(shift_logits.transpose(
+                    1, 2).contiguous(), shift_labels)
+                loss = loss.sum(dim=-1) / margin_cnt
+                loss = (-1) * loss
+                loss = loss.reshape(lm_labels.size(0), 3)
+                _margin_ranking_loss = loss_func(
+                    loss, torch.ones(loss.size(0)).long().to(device) * 2).mean(dim=-1)
+                _total_loss = _qa_loss + args.alpha * _lm_loss + args.beta * _margin_ranking_loss
+                logger.info("sparse experience replay done: {}".format(
+                    _total_loss.item()))
+
             if args.accumulate_grad_batches > 0:
                 total_loss = total_loss / args.accumulate_grad_batches
             total_loss.backward()
