@@ -189,7 +189,7 @@ def train(args, model, tokenizer):
             total_loss = qa_loss + args.alpha * lm_loss + args.beta * mean_margin_loss
 
             # add to memory
-            if args.memory and memory is not None and (step + 1) % 50 == 0:
+            if args.memory and memory is not None and (step + 1) % args.write_interval == 0:
                 added_ = []
                 _tmp = (lm_input_dict['input_ids'][_id_max_margin_loss].tolist(), lm_labels[_id_max_margin_loss].tolist(), qa_input_dict['input_ids'][_id_max_margin_loss].tolist(), qa_labels[_id_max_margin_loss].tolist(), [
                         margin_dict['input_ids'][i].tolist() for i in range(_id_max_margin_loss, _id_max_margin_loss+3)], [margin_labels[i].tolist() for i in range(_id_max_margin_loss, _id_max_margin_loss+3)], [margin_cnt[i].item() for i in range(_id_max_margin_loss, _id_max_margin_loss+3)])
@@ -230,6 +230,7 @@ def train(args, model, tokenizer):
                 _margin_ranking_loss = loss_func(
                     loss, torch.ones(loss.size(0)).long().to(device) * 2).mean(dim=-1)
                 _total_loss = _qa_loss + args.alpha * _lm_loss + args.beta * _margin_ranking_loss
+                _total_loss.backward()
                 logger.info("sparse experience replay done: {}".format(
                     _total_loss.item()))
 
