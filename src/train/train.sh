@@ -9,13 +9,14 @@ python train.py \
   --model_name gpt2 \
   --output_dir ../../output \
   --max_epochs 1 \
-  --train_batch_size 16 \
+  --train_batch_size 8 \
   --dev_batch_size 8 \
+  --lr 3e-5 \
   --device cuda:0 \
   --accumulate_grad_batches 2 \
   --logging_steps 100 \
   --eval_steps 1000 \
-  --write_interval 100 \
-  --replay_interval 200 \
+  --write_interval 50 \
+  --replay_interval 400 \
   --memory \
   "$@"
