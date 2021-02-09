@@ -6,9 +6,12 @@
 ## Task Format
 + A unified language model(e.g., GPT-2) as both learner and pesudo-sample generator.
 + learning task:
-    1. 
-    2. 
+
+    1. generative commonsense question answering.
+    2. discriminative multiple-choice commonsense reasoning.
 + sample generation task:
+
+generate the complete commonsense questions.
 
 ## Two types of experience rehearsal
 1. meta-replay by uncertain examples stored in physical episodic memory module.
