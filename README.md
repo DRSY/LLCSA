@@ -11,7 +11,7 @@
     2. discriminative multiple-choice commonsense reasoning.
 + sample generation task:
 
-generate the complete commonsense questions.
+    generate the complete commonsense questions.
 
 ## Two types of experience rehearsal
 1. meta-replay by uncertain examples stored in physical episodic memory module.
