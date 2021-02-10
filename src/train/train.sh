@@ -12,7 +12,7 @@ python train.py \
   --train_batch_size 8 \
   --dev_batch_size 8 \
   --lr 3e-5 \
-  --device cuda:1 \
+  --device cuda:0 \
   --accumulate_grad_batches 2 \
   --logging_steps 100 \
   --eval_steps 1000 \
@@ -20,4 +20,5 @@ python train.py \
   --replay_interval 400 \
   --memory \
   --meta_replay \
+  --kl \
   "$@"

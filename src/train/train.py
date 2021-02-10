@@ -14,7 +14,11 @@ from tqdm import trange, tqdm
 from copy import deepcopy
 import os
 
+import optuna
+
 logger = logging.getLogger(__name__)
+KL_func = nn.KLDivLoss(log_target=True)
+robust_kl_loss_fct = nn.KLDivLoss(reduction='batchmean')
 
 
 @torch.no_grad()
@@ -84,15 +88,91 @@ def evaluate(args, model, tokenizer, global_steps):
     return {'acc': acc, 'avg_loss': avg_loss}
 
 
-def train(args, model, tokenizer):
-    """
-    :param args:
-    :param dataset:
-    :param model:
-    :param tokenizer:
-    :param eval_dataset:
-    :return:
-    """
+def eval_loss_on_old_model(model, old_state_dict, batch, device, cross_xnt, loss_func):
+    # reload model to previous parameters
+    model.load_state_dict(old_state_dict)
+    model.eval()
+    with torch.no_grad():
+        # normal continual training over stream of data
+        lm_input_dict, lm_labels, qa_input_dict, qa_labels, margin_dict, margin_labels, margin_cnt = batch
+        lm_input_dict = lm_input_dict.to(device)
+        lm_labels = lm_labels.to(device)
+        qa_input_dict = qa_input_dict.to(device)
+        qa_labels = qa_labels.to(device)
+
+        # lm loss
+        lm_output = model(**lm_input_dict, labels=lm_labels)
+        lm_loss = lm_output.loss
+        lm_logits = lm_output.logits
+
+        # qa loss
+        qa_output = model(**qa_input_dict, labels=qa_labels)
+        qa_loss = qa_output.loss
+        qa_logits = qa_output.logits
+
+        # margin ranking loss
+        margin_dict = margin_dict.to(device)
+        margin_labels = margin_labels.to(device)
+        margin_cnt = margin_cnt.to(device)
+        margin_output = model(**margin_dict)
+        logits = margin_output.logits
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = margin_labels[..., 1:].contiguous()
+        loss = cross_xnt(shift_logits.transpose(
+            1, 2).contiguous(), shift_labels)
+        loss = loss.sum(dim=-1) / margin_cnt
+        loss = (-1) * loss
+        loss = loss.reshape(lm_labels.size(0), 3)
+        margin_ranking_loss = loss_func(
+            loss, torch.ones(loss.size(0)).long().to(device) * 2)
+        _id_max_margin_loss = torch.argmax(
+            margin_ranking_loss, dim=-1).item()
+        mean_margin_loss = margin_ranking_loss.mean(dim=-1)
+        margin_logits = loss
+
+        total_loss = qa_loss + args.alpha * lm_loss + args.beta * mean_margin_loss
+    model.train()
+    return total_loss, (lm_logits, qa_logits, margin_logits)
+
+
+def robust_kl_loss(tokenizer, args, old_logits, new_logits, lm_input_ids, qa_labels):
+    temperature = 2.0
+    old_lm_logits, old_qa_logits, old_margin_logits = old_logits
+    vocab_size = old_lm_logits.size(-1)
+    bs = old_lm_logits.size(0)
+    new_lm_logits, new_qa_logits, new_margin_logits = new_logits
+    lm_mask = (lm_input_ids != tokenizer.pad_token_id)
+    selected_old_lm_logits = torch.softmax(torch.masked_select(
+        old_lm_logits, lm_mask.unsqueeze(-1)).reshape(-1, vocab_size) / temperature, dim=-1)
+    selected_new_lm_logits = torch.log_softmax(torch.masked_select(
+        new_lm_logits, lm_mask.unsqueeze(-1)).reshape(-1, vocab_size) / temperature, dim=-1)
+    qa_mask = (qa_labels != -100)
+    for i in range(bs):
+        for j in range(qa_mask.size(-1)):
+            if qa_mask[i, j] == True and j > 0:
+                qa_mask[i, j-1] = True
+                break
+    selected_old_qa_logits = torch.softmax(torch.masked_select(
+        old_qa_logits, qa_mask.unsqueeze(-1)).reshape(-1, vocab_size) / temperature, dim=-1)
+    selected_new_qa_logits = torch.log_softmax(torch.masked_select(
+        new_qa_logits, qa_mask.unsqueeze(-1)).reshape(-1, vocab_size) / temperature, dim=-1)
+    lm_kl_loss = robust_kl_loss_fct(
+        selected_new_lm_logits, selected_old_lm_logits)
+    qa_kl_loss = robust_kl_loss_fct(
+        selected_new_qa_logits, selected_old_qa_logits)
+    margin_target_logits = torch.softmax(old_margin_logits, dim=-1)
+    margin_new_logits = torch.log_softmax(new_margin_logits, dim=-1)
+    margin_kl_loss = robust_kl_loss_fct(
+        margin_new_logits, margin_target_logits)
+    _loss = qa_kl_loss + args.alpha * lm_kl_loss + args.beta * margin_kl_loss
+    return _loss
+
+
+def train(trial, args, model, tokenizer):
+    suggested_kl_interval = trial.suggest_categorical(
+        "kl_interval", [20, 30, 40, 60])
+    suggested_replay_interval = trial.suggest_categorical(
+        "replay_interval", [50, 100, 150, 200])
     device = torch.device(args.device)
     model.to(device)
     train_dataset = CSDataset(args.train_data)
@@ -140,6 +220,8 @@ def train(args, model, tokenizer):
     logger.info("  Episode Memory = {}".format(memory))
     if args.meta_replay:
         logger.info("Use meta replay")
+    if args.kl:
+        logger.info("Use KL distillation")
 
     seed_everything(args.seed)
     train_iterator = trange(int(args.max_epochs), desc="Epoch")
@@ -151,6 +233,8 @@ def train(args, model, tokenizer):
     best_steps = 0
     total_n_input = 0
     cross_xnt = nn.CrossEntropyLoss(reduction='none')
+    previous_state_dict = deepcopy(
+        model.state_dict())  # previous model parameters
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration")
         for step, batch in enumerate(epoch_iterator):
@@ -165,13 +249,15 @@ def train(args, model, tokenizer):
             qa_input_dict = qa_input_dict.to(device)
             qa_labels = qa_labels.to(device)
 
-            # lm loss
+            # language modeling loss
             lm_output = model(**lm_input_dict, labels=lm_labels)
             lm_loss = lm_output.loss
+            lm_logits = lm_output.logits
 
             # qa loss
             qa_output = model(**qa_input_dict, labels=qa_labels)
             qa_loss = qa_output.loss
+            qa_logits = qa_output.logits
 
             # margin ranking loss
             margin_dict = margin_dict.to(device)
@@ -191,7 +277,9 @@ def train(args, model, tokenizer):
             _id_max_margin_loss = torch.argmax(
                 margin_ranking_loss, dim=-1).item()
             mean_margin_loss = margin_ranking_loss.mean(dim=-1)
+            margin_logits = loss
 
+            # total loss
             total_loss = qa_loss + args.alpha * lm_loss + args.beta * mean_margin_loss
 
             # write to memory
@@ -204,18 +292,33 @@ def train(args, model, tokenizer):
 
             if args.accumulate_grad_batches > 0:
                 total_loss = total_loss / args.accumulate_grad_batches
-            total_loss.backward()
+            total_loss.backward(retain_graph=True)
             tr_loss += total_loss.item()
             if (step + 1) % args.accumulate_grad_batches == 0:
                 global_steps += 1
+                # eval loss on previous model parameters and encourage positive forward transfer
+                # if args.kl and global_steps >= 1 and global_steps % args.kl_interval == 0:
+                if args.kl and global_steps >= 1 and global_steps % suggested_kl_interval == 0:
+                    _model = deepcopy(model)
+                    _model.to(model.device)
+                    loss_old_model, old_logits = eval_loss_on_old_model(
+                        _model, previous_state_dict, batch, device, cross_xnt, loss_func)
+                    if loss_old_model >= (total_loss.item() * args.accumulate_grad_batches):
+                        logger.info("move forward")
+                    else:
+                        kl_loss = robust_kl_loss(tokenizer, args, old_logits, (
+                            lm_logits, qa_logits, margin_logits), lm_input_dict['input_ids'], qa_labels)
+                        kl_loss.backward()
+                        logger.info("KL loss: {}".format(kl_loss.item()))
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
                 torch.cuda.empty_cache()
                 del total_loss, qa_loss, lm_loss, mean_margin_loss
 
-                # sparse meta experience replay using previously seen unconfident examples
-                if args.replay_interval > 0 and (global_steps) % args.replay_interval == 0:
+                # sparse meta-replay using previously seen unconfident examples to alleviate catastrophic forgetting
+                # if args.memory and memory is not None and args.replay_interval > 0 and (global_steps) % args.replay_interval == 0:
+                if args.memory and memory is not None and suggested_replay_interval > 0 and (global_steps) % suggested_replay_interval == 0:
                     lm_input_dict, lm_labels, qa_input_dict, qa_labels, margin_dict, margin_labels, margin_cnt = memory.sample(
                         total_n_input // (step + 1))
                     lm_input_dict = lm_input_dict.to(device)
@@ -256,6 +359,7 @@ def train(args, model, tokenizer):
                     logger.info("sparse experience replay done, loss: {}, currrent memory size: {}".format(
                         _total_loss.item(), len(memory)))
 
+                previous_state_dict = original_model_state_dict
                 # experience replay using pesudo samples generated by model itself
                 if args.pesudo_replay and (global_steps) % args.pesudo_replay_interval == 0:
                     pass
@@ -280,9 +384,10 @@ def train(args, model, tokenizer):
                         tokenizer.save_pretrained(args.output_dir)
                         logger.info("model saved at {} global steps with acc {}".format(
                             global_steps, best_acc))
+    return best_acc
 
 
-def main(args):
+def main(trial):
     if not args.model_type in MODEL_META_CLASS.keys():
         raise Exception("Invalid model type")
     tokenizer_class, model_class = MODEL_META_CLASS[args.model_type]
@@ -300,11 +405,14 @@ def main(args):
     logger.info("new vocab size: {}".format(len(tokenizer)))
     model.resize_token_embeddings(len(tokenizer))
 
-    train(args, model, tokenizer)
+    best_acc = train(trial, args, model, tokenizer)
+    return best_acc
 
 
 if __name__ == '__main__':
     args = parse_args()
     init_logging(os.path.join(args.output_dir, "log_train.txt"))
     logger.info("args = {}".format(str(args)))
-    main(args)
+    study = optuna.create_study(direction='maximize')
+    study.optimize(main, n_trials=16)
+    # main(args)
