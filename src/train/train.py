@@ -88,7 +88,7 @@ def evaluate(args, model, tokenizer, global_steps):
     return {'acc': acc, 'avg_loss': avg_loss}
 
 
-def eval_loss_on_old_model(model, old_state_dict, batch, device, cross_xnt, loss_func):
+def eval_loss_on_old_model(args, model, old_state_dict, batch, device, cross_xnt, loss_func):
     # reload model to previous parameters
     model.load_state_dict(old_state_dict)
     model.eval()
@@ -130,7 +130,12 @@ def eval_loss_on_old_model(model, old_state_dict, batch, device, cross_xnt, loss
         mean_margin_loss = margin_ranking_loss.mean(dim=-1)
         margin_logits = loss
 
-        total_loss = qa_loss + args.alpha * lm_loss + args.beta * mean_margin_loss
+        # total_loss = qa_loss + args.alpha * lm_loss + args.beta * mean_margin_loss
+        total_loss = args.beta * mean_margin_loss
+        if args.lm_loss:
+            total_loss = total_loss + args.alpha * lm_loss
+        if args.qa_loss:
+            total_loss = total_loss + qa_loss
     model.train()
     return total_loss, (lm_logits, qa_logits, margin_logits)
 
@@ -164,7 +169,12 @@ def robust_kl_loss(tokenizer, args, old_logits, new_logits, lm_input_ids, qa_lab
     margin_new_logits = torch.log_softmax(new_margin_logits, dim=-1)
     margin_kl_loss = robust_kl_loss_fct(
         margin_new_logits, margin_target_logits)
-    _loss = qa_kl_loss + args.alpha * lm_kl_loss + args.beta * margin_kl_loss
+    _loss = args.beta * margin_kl_loss
+    if args.lm_loss:
+        _loss = _loss + args.alpha * lm_kl_loss
+    if args.qa_loss:
+        _loss = _loss + qa_kl_loss
+    # _loss = qa_kl_loss + args.alpha * lm_kl_loss + args.beta * margin_kl_loss
     return _loss
 
 
@@ -218,10 +228,22 @@ def train(trial, args, model, tokenizer):
                 args.accumulate_grad_batches)
     logger.info("  Total optimization steps = %d", t_total)
     logger.info("  Episode Memory = {}".format(memory))
+    if args.lm_loss:
+        logger.info("Use LM loss")
+    else:
+        logger.info("Use no LM loss")
+    if args.qa_loss:
+        logger.info("Use QA loss")
+    else:
+        logger.info("Use no QA loss")
     if args.meta_replay:
         logger.info("Use meta replay")
+    else:
+        logger.info("Use no meta replay")
     if args.kl:
         logger.info("Use KL distillation")
+    else:
+        logger.info("Use no KL distillation")
 
     seed_everything(args.seed)
     train_iterator = trange(int(args.max_epochs), desc="Epoch")
@@ -280,7 +302,12 @@ def train(trial, args, model, tokenizer):
             margin_logits = loss
 
             # total loss
-            total_loss = qa_loss + args.alpha * lm_loss + args.beta * mean_margin_loss
+            # total_loss = qa_loss + args.alpha * lm_loss + args.beta * mean_margin_loss
+            total_loss = args.beta * mean_margin_loss
+            if args.lm_loss:
+                total_loss = total_loss + args.alpha * lm_loss
+            if args.qa_loss:
+                total_loss = total_loss + qa_loss
 
             # write to memory
             if args.memory and memory is not None and (step + 1) % args.write_interval == 0:
@@ -301,8 +328,8 @@ def train(trial, args, model, tokenizer):
                 if args.kl and global_steps >= 1 and global_steps % suggested_kl_interval == 0:
                     _model = deepcopy(model)
                     _model.to(model.device)
-                    loss_old_model, old_logits = eval_loss_on_old_model(
-                        _model, previous_state_dict, batch, device, cross_xnt, loss_func)
+                    loss_old_model, old_logits = eval_loss_on_old_model(args,
+                                                                        _model, previous_state_dict, batch, device, cross_xnt, loss_func)
                     if loss_old_model >= (total_loss.item() * args.accumulate_grad_batches):
                         logger.info("move forward")
                     else:
@@ -349,7 +376,12 @@ def train(trial, args, model, tokenizer):
                     loss = loss.reshape(lm_labels.size(0), 3)
                     _margin_ranking_loss = loss_func(
                         loss, torch.ones(loss.size(0)).long().to(device) * 2).mean(dim=-1)
-                    _total_loss = _qa_loss + args.alpha * _lm_loss + args.beta * _margin_ranking_loss
+                    # _total_loss = _qa_loss + args.alpha * _lm_loss + args.beta * _margin_ranking_loss
+                    _total_loss = args.beta * _margin_ranking_loss
+                    if args.lm_loss:
+                        _total_loss = _total_loss + args.alpha * _lm_loss
+                    if args.qa_loss:
+                        _total_loss = _total_loss + _qa_loss
                     _total_loss.backward()
                     # first-order MAML update upon gpt2
                     if args.meta_replay:
@@ -411,7 +443,7 @@ def main(trial):
 
 if __name__ == '__main__':
     args = parse_args()
-    init_logging(os.path.join(args.output_dir, "log_train.txt"))
+    init_logging(os.path.join(args.output_dir, "log_train_right_kd.txt"))
     logger.info("args = {}".format(str(args)))
     study = optuna.create_study(direction='maximize')
     study.optimize(main, n_trials=16)

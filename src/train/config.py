@@ -80,6 +80,8 @@ def parse_args():
     parser.add_argument("--pesudo_replay_interval", type=int, default=200)
     parser.add_argument("--kl", action='store_true', default=False)
     parser.add_argument("--kl_interval", type=int, default=50)
+    parser.add_argument("--lm_loss", action='store_true', default=False)
+    parser.add_argument("--qa_loss", action='store_true', default=False)
     args = parser.parse_args()
     return args
 

@@ -21,4 +21,7 @@ python train.py \
   --memory \
   --meta_replay \
   --kl \
+  # --lm_loss \
+  # --qa_loss \
+  # --kl \
   "$@"
