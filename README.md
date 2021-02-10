@@ -1,6 +1,7 @@
 # Lifelong Commonsense Knowledge Acquisition
 
 ## Principle
++ Past commonsense knowledge should accelerate or at least not affect the learning of new commonsenses or more sophisticated skills.
 + Past commonsense knowledge should be retained and accumulated as model learns new commonsense or more sophisticated skills.
 
 ## Task Format
